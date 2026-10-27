@@ -6,6 +6,9 @@
 
 void DrawGraphTab(AppState& state)
 {
+    // Настройка шлейфа, вынесенная для ползунка
+    static float TRAIL_DURATION = 1.5f;
+
     // Получаем текущие углы
     float angle1 = state.serial1.getCurrentAngle();
 
@@ -24,11 +27,23 @@ void DrawGraphTab(AppState& state)
     if (angle2 < 0) angle2 += 360.0f;
 
     // --- Отрисовка графика ---
+    ImGui::SetWindowFontScale(1.5f);
+
     ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "X (Dev 1): %.2f", angle1);
     ImGui::SameLine();
     ImGui::Text(" | ");
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Y (Dev 2): %.2f", angle2);
+
+    ImGui::SetWindowFontScale(1.0f);
+
+    // --- НОВОЕ: Ползунок для настройки шлейфа ---
+    ImGui::SetNextItemWidth(200.0f); // Ширина ползунка
+    ImGui::SliderFloat("Trail duration (sec)", &TRAIL_DURATION, 0.0f, 5.0f, "%.2f");
+    if (TRAIL_DURATION <= 0.01f) {
+        // Если ползунок на нуле, шлейфа нет
+    }
+
     ImGui::Separator();
 
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
@@ -106,9 +121,63 @@ void DrawGraphTab(AppState& state)
     draw_list->AddCircleFilled(ptX, 6.0f, IM_COL32(100, 255, 100, 255)); // Зеленая на X
     draw_list->AddCircleFilled(ptY, 6.0f, IM_COL32(100, 150, 255, 255)); // Синяя на Y
 
-    // 7. Рисуем точку пересечения (там, где пересекаются вертикальная и горизонтальная линии)
-    ImVec2 intersect = ImVec2(ptX.x, ptY.y); // Пересечение всегда на этих координатах
-    draw_list->AddCircleFilled(intersect, 5.0f, IM_COL32(255, 50, 50, 255)); // Красная в центре
+    // --- НАСТРОЙКИ ЭФФЕКТА "ШЛЕЙФА" (TRAIL) ---
+    const float TRAIL_MAX_THICKNESS = 6.0f; // Максимальная толщина линии в начале
+    const float TRAIL_MIN_THICKNESS = 0.5f; // Минимальная толщина в конце
+    const float TRAIL_MAX_ALPHA = 200.0f;   // Максимальная прозрачность (0-255)
+    const ImU32 TRAIL_COLOR = IM_COL32(255, 50, 50, 255); // Базовый цвет (красный)
+
+    float currentTime = ImGui::GetTime();
+    static std::vector<std::pair<ImVec2, float>> trailHistory;
+    ImVec2 intersect = ImVec2(ptX.x, ptY.y);
+
+    // Добавляем текущую точку в историю
+    trailHistory.push_back({intersect, currentTime});
+
+    // Удаляем старые точки (если ползунок на 0, просто очищаем историю)
+    if (TRAIL_DURATION > 0.01f) {
+        while (!trailHistory.empty() && (currentTime - trailHistory.front().second > TRAIL_DURATION)) {
+            trailHistory.erase(trailHistory.begin());
+        }
+    } else {
+        trailHistory.clear();
+    }
+
+    // Защита от переполнения памяти
+    if (trailHistory.size() > 500) {
+        trailHistory.erase(trailHistory.begin(), trailHistory.begin() + (trailHistory.size() - 500));
+    }
+
+    // Рисуем шлейф как линии между точками
+    if (trailHistory.size() > 1) {
+        for (size_t i = 0; i < trailHistory.size() - 1; ++i) {
+            // Вычисляем "возраст" сегмента (берем среднее время между точками)
+            float age = currentTime - trailHistory[i].second;
+            float lifeRatio = 1.0f - (age / TRAIL_DURATION); // 1.0 (новый) -> 0.0 (старый)
+
+            if (lifeRatio > 0.0f) {
+                // Толщина уменьшается со временем
+                float thickness = TRAIL_MIN_THICKNESS + (TRAIL_MAX_THICKNESS - TRAIL_MIN_THICKNESS) * lifeRatio;
+
+                // Прозрачность уменьшается со временем
+                float alpha = TRAIL_MAX_ALPHA * lifeRatio;
+
+                // Создаем цвет с текущей прозрачностью
+                ImU32 color = IM_COL32(
+                    (TRAIL_COLOR >> 0) & 0xFF,   // R
+                    (TRAIL_COLOR >> 8) & 0xFF,   // G
+                    (TRAIL_COLOR >> 16) & 0xFF,  // B
+                    (int)alpha                   // A
+                );
+
+                // Рисуем линию от текущей точки к следующей
+                draw_list->AddLine(trailHistory[i].first, trailHistory[i+1].first, color, thickness);
+            }
+        }
+    }
+
+    // Рисуем текущую (самую новую) точку поверх шлейфа (яркую)
+    draw_list->AddCircleFilled(intersect, TRAIL_MAX_THICKNESS * 0.8f, IM_COL32(255, 50, 50, 255));
 
     // Сдвигаем курсор, чтобы ImGui знал, что мы заняли место
     ImGui::Dummy(ImVec2(size + 60.0f, size + 60.0f));
