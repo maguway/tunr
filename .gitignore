@@ -1,0 +1,6 @@
+/.idea/
+/vendor/
+/build/
+/cmake-build-debug/
+/turn.exe
+/imgui.ini
