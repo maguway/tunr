@@ -108,7 +108,7 @@ void DrawGraphTab(AppState& state)
 
     // 7. Рисуем точку пересечения (там, где пересекаются вертикальная и горизонтальная линии)
     ImVec2 intersect = ImVec2(ptX.x, ptY.y); // Пересечение всегда на этих координатах
-    draw_list->AddCircleFilled(intersect, 5.0f, IM_COL32(255, 50, 50, 255)); // Белая в центре
+    draw_list->AddCircleFilled(intersect, 5.0f, IM_COL32(255, 50, 50, 255)); // Красная в центре
 
     // Сдвигаем курсор, чтобы ImGui знал, что мы заняли место
     ImGui::Dummy(ImVec2(size + 60.0f, size + 60.0f));

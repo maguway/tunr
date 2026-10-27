@@ -11,8 +11,8 @@ class SerialPortManager
 {
 public:
     SerialPortManager();
-    void setParseMarker(bool enable);
     ~SerialPortManager();
+    void setParseMarker(bool enable);
 
     std::vector<std::string> getAvailablePorts();
 

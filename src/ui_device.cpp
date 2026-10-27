@@ -28,7 +28,7 @@ void DrawDeviceTab(AppState& state)
         }
     }
 
-    const int baudRates[] = {9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600};
+    // const int baudRates[] = {9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600};
     static std::vector<char> displayBuffer(1 << 16, 0);
 
     // ==========================================
@@ -279,7 +279,7 @@ void DrawDeviceTab(AppState& state)
 void DrawTopBar(AppState& state)
 {
     // Разделяем экран на две половины для двух устройств
-    float halfWidth = ImGui::GetContentRegionAvail().x * 0.5f - 5.0f;
+    // float halfWidth = ImGui::GetContentRegionAvail().x * 0.5f - 5.0f;
 
     // --- Левая половина (Устройство 1) ---
     ImGui::BeginGroup();
