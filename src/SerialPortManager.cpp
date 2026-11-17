@@ -1,10 +1,10 @@
 #include "SerialPortManager.h"
-
 #include <windows.h>
 #include <sstream>
 #include <iomanip>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 SerialPortManager::SerialPortManager() = default;
 
@@ -16,10 +16,7 @@ SerialPortManager::~SerialPortManager()
 std::vector<std::string> SerialPortManager::getAvailablePorts()
 {
     std::vector<std::string> ports;
-
-    // Современный способ (Windows 10 1803+)
-    typedef DWORD (WINAPI
-        *GetCommPortsFn)(PULONG, ULONG, PULONG);
+    typedef DWORD (WINAPI *GetCommPortsFn)(PULONG, ULONG, PULONG);
     HMODULE hKernel = GetModuleHandleW(L"kernel32.dll");
     if (hKernel)
     {
@@ -39,7 +36,6 @@ std::vector<std::string> SerialPortManager::getAvailablePorts()
         }
     }
 
-    // Fallback: перебор COM1..COM256
     for (int i = 1; i <= 256; ++i)
     {
         std::string name = "COM" + std::to_string(i);
@@ -76,7 +72,7 @@ bool SerialPortManager::open(const std::string& portName, int baudRate)
         CloseHandle(h);
         return false;
     }
-    dcb.BaudRate = baudRate; // <-- ИСПОЛЬЗУЕМ ПЕРЕДАННУЮ СКОРОСТЬ
+    dcb.BaudRate = baudRate;
     dcb.ByteSize = 8;
     dcb.Parity = NOPARITY;
     dcb.StopBits = ONESTOPBIT;
@@ -146,7 +142,6 @@ void SerialPortManager::readLoop()
             continue;
         }
 
-        // --- Запись в файл (HEX) ---
         {
             std::lock_guard<std::mutex> logLock(m_logMutex);
             if (m_logFile)
@@ -167,80 +162,141 @@ void SerialPortManager::readLoop()
     }
 }
 
+void SerialPortManager::setParseMode(ParseMode mode)
+{
+    m_parseMode = mode;
+}
+
+void SerialPortManager::setParseMarker(bool enable)
+{
+    // Если enable == true, значит старый режим с маркерами.
+    // Если false — включаем RawOnly, чтобы просто копить данные для Dev2.
+    m_parseMode = enable ? ParseMode::Marker : ParseMode::RawOnly;
+}
+
 void SerialPortManager::parseAndFormat()
 {
-    // --- ЗАЩИТА ОТ ПЕРЕПОЛНЕНИЯ RAW-БУФЕРА ---
-    const size_t MAX_RAW_BUFFER = 1024 * 1024; // 1 Мегабайт
+    // Если режим RawOnly - просто накапливаем данные и ничего не парсим.
+    // UI сам заберет их через getRawData().
+    if (m_parseMode == ParseMode::RawOnly)
+    {
+        return;
+    }
+
+    const size_t MAX_RAW_BUFFER = 1024 * 1024;
     if (m_rawBuffer.size() > MAX_RAW_BUFFER) {
-        // Оставляем только последние 512 КБ, чтобы не разорвать текущий пакет
         size_t eraseCount = m_rawBuffer.size() - (MAX_RAW_BUFFER / 2);
         m_rawBuffer.erase(m_rawBuffer.begin(), m_rawBuffer.begin() + eraseCount);
     }
 
-    // --- НОВОЕ: Если маркер не нужен, просто оставляем всё как есть ---
-    if (!m_useMarker)
+    if (m_parseMode == ParseMode::Marker)
     {
-        return;
-    }
-    // -----------------------------------------------------------------
-
-    // Ищем маркер 0x23 0x23
-    size_t i = 0;
-
-    while (i + 3 < m_rawBuffer.size()) // нужно минимум 4 байта: ## + старший + младший
-    {
-        if (m_rawBuffer[i] == 0x23 && m_rawBuffer[i + 1] == 0x23)
+        size_t i = 0;
+        while (i + 3 < m_rawBuffer.size())
         {
-            // Нашли пакет
-            unsigned char high = m_rawBuffer[i + 2];
-            unsigned char low = m_rawBuffer[i + 3];
+            if (m_rawBuffer[i] == 0x23 && m_rawBuffer[i + 1] == 0x23)
+            {
+                unsigned char high = m_rawBuffer[i + 2];
+                unsigned char low = m_rawBuffer[i + 3];
+                m_rawValue = (static_cast<unsigned int>(high) << 8) | low;
+                m_currentAngle = (static_cast<float>(m_rawValue) * 360.0f) / 4096.0f;
+                i += 4;
+            }
+            else { i++; }
+        }
 
-            // Собираем сырое значение (старший байт, затем младший)
-            m_rawValue = (static_cast<unsigned int>(high) << 8) | low;
+        if (i > 0)
+        {
+            if (i > m_rawBuffer.size() - 3) i = m_rawBuffer.size() > 3 ? m_rawBuffer.size() - 3 : 0;
+            std::ostringstream oss;
+            for (size_t j = 0; j < i; ++j)
+            {
+                oss << std::hex << std::setw(2) << std::setfill('0') << (int)m_rawBuffer[j] << ' ';
+                m_byteCountForNewLine++;
+                if (m_byteCountForNewLine % 16 == 0) oss << '\n';
+            }
+            m_displayText += oss.str();
 
-            // Вычисляем угол: (значение / 4096) * 360
+            const size_t MAX_DISPLAY = 65536;
+            if (m_displayText.size() > MAX_DISPLAY) {
+                m_displayText.erase(0, m_displayText.size() - MAX_DISPLAY);
+                size_t firstNewLine = m_displayText.find('\n');
+                if (firstNewLine != std::string::npos && firstNewLine < 20) {
+                    m_displayText.erase(0, firstNewLine + 1);
+                }
+            }
+            m_rawBuffer.erase(m_rawBuffer.begin(), m_rawBuffer.begin() + i);
+        }
+    }
+    else if (m_parseMode == ParseMode::Raw16Bit)
+    {
+        size_t i = 0;
+        while (i + 1 < m_rawBuffer.size())
+        {
+            unsigned char high = m_rawBuffer[i];
+            unsigned char low = m_rawBuffer[i + 1];
+            unsigned int val = (static_cast<unsigned int>(high) << 8) | low;
+            m_rawValue = val;
             m_currentAngle = (static_cast<float>(m_rawValue) * 360.0f) / 4096.0f;
+            i += 2;
+        }
 
-            // Пропускаем обработанный пакет
+        if (i > 0)
+        {
+            std::ostringstream oss;
+            for (size_t j = 0; j < i; ++j) {
+                oss << std::hex << std::setw(2) << std::setfill('0') << (int)m_rawBuffer[j] << ' ';
+                m_byteCountForNewLine++;
+                if (m_byteCountForNewLine % 16 == 0) oss << '\n';
+            }
+            m_displayText += oss.str();
+
+            const size_t MAX_DISPLAY = 65536;
+            if (m_displayText.size() > MAX_DISPLAY) {
+                m_displayText.erase(0, m_displayText.size() - MAX_DISPLAY);
+                size_t firstNewLine = m_displayText.find('\n');
+                if (firstNewLine != std::string::npos && firstNewLine < 20) {
+                    m_displayText.erase(0, firstNewLine + 1);
+                }
+            }
+            m_rawBuffer.erase(m_rawBuffer.begin(), m_rawBuffer.begin() + i);
+        }
+    }
+    else if (m_parseMode == ParseMode::RawFloat)
+    {
+        size_t i = 0;
+        while (i + 3 < m_rawBuffer.size())
+        {
+            float f;
+            std::memcpy(&f, &m_rawBuffer[i], sizeof(float));
+            if (f >= -360.0f && f <= 720.0f)
+            {
+                m_currentAngle = f;
+                m_rawValue = static_cast<unsigned int>(f * 4096.0f / 360.0f);
+            }
             i += 4;
         }
-        else
-        {
-            i++; // Если это не маркер — просто идём дальше
-        }
-    }
 
-    // Удаляем из буфера всё, что мы уже просмотрели (чтобы не копить мусор)
-    if (i > 0)
-    {
-        if (i > m_rawBuffer.size() - 3) i = m_rawBuffer.size() > 3 ? m_rawBuffer.size() - 3 : 0;
-
-        // --- ДОБАВЛЕНО: Формируем текст для лога ---
-        std::ostringstream oss;
-        for (size_t j = 0; j < i; ++j)
+        if (i > 0)
         {
-            oss << std::hex << std::setw(2) << std::setfill('0') << (int)m_rawBuffer[j] << ' ';
-            m_byteCountForNewLine++;
-            if (m_byteCountForNewLine % 16 == 0)
-                oss << '\n';
-        }
-        m_displayText += oss.str();
-
-        // Ограничиваем лог, чтобы он не жрал память бесконечно
-        const size_t MAX_DISPLAY = 65536;
-        if (m_displayText.size() > MAX_DISPLAY)
-        {
-            m_displayText.erase(0, m_displayText.size() - MAX_DISPLAY);
-            // Чтобы обрезка не сломала текущую строку, найдем первый \n
-            size_t firstNewLine = m_displayText.find('\n');
-            if (firstNewLine != std::string::npos && firstNewLine < 20)
-            {
-                m_displayText.erase(0, firstNewLine + 1);
+            std::ostringstream oss;
+            for (size_t j = 0; j < i; ++j) {
+                oss << std::hex << std::setw(2) << std::setfill('0') << (int)m_rawBuffer[j] << ' ';
+                m_byteCountForNewLine++;
+                if (m_byteCountForNewLine % 16 == 0) oss << '\n';
             }
-        }
-        // -----------------------------------------------------------
+            m_displayText += oss.str();
 
-        m_rawBuffer.erase(m_rawBuffer.begin(), m_rawBuffer.begin() + i);
+            const size_t MAX_DISPLAY = 65536;
+            if (m_displayText.size() > MAX_DISPLAY) {
+                m_displayText.erase(0, m_displayText.size() - MAX_DISPLAY);
+                size_t firstNewLine = m_displayText.find('\n');
+                if (firstNewLine != std::string::npos && firstNewLine < 20) {
+                    m_displayText.erase(0, firstNewLine + 1);
+                }
+            }
+            m_rawBuffer.erase(m_rawBuffer.begin(), m_rawBuffer.begin() + i);
+        }
     }
 }
 
@@ -266,7 +322,7 @@ void SerialPortManager::startRecording(const std::string& filename)
     {
         fclose(m_logFile);
     }
-    m_logFile = fopen(filename.c_str(), "w"); // Текстовый режим
+    m_logFile = fopen(filename.c_str(), "w");
 }
 
 void SerialPortManager::stopRecording()
@@ -288,11 +344,6 @@ std::vector<unsigned char> SerialPortManager::getRawData()
 {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_rawBuffer;
-}
-
-void SerialPortManager::setParseMarker(bool enable)
-{
-    m_useMarker = enable;
 }
 
 void SerialPortManager::writeLogLine(const std::string& line)

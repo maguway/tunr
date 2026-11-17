@@ -30,6 +30,9 @@ int main()
     AppState state;
     state.serial2.setParseMarker(false); // Отключаем маркер для второго устройства
 
+    // ВКЛЮЧАЕМ НОВЫЙ РЕЖИМ ДЛЯ ПЕРВОГО УСТРОЙСТВА
+    state.serial1.setParseMode(ParseMode::RawFloat);
+
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
