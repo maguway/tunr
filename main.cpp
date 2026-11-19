@@ -33,6 +33,10 @@ int main()
     // ВКЛЮЧАЕМ НОВЫЙ РЕЖИМ ДЛЯ ПЕРВОГО УСТРОЙСТВА
     state.serial1.setParseMode(ParseMode::RawFloat);
 
+    // Передаем общий логгер сессии в порты (1 = Dev1, 2 = Dev2)
+    state.serial1.setSessionLogger(&state.logger, 1);
+    state.serial2.setSessionLogger(&state.logger, 2);
+
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
@@ -60,7 +64,7 @@ int main()
             }
             if (ImGui::BeginTabItem("Angle Graph"))
             {
-                DrawGraphTab(state); // <-- Вызываем нашу новую функцию
+                DrawGraphTab(state);
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
@@ -77,6 +81,8 @@ int main()
         glfwSwapBuffers(window);
     }
 
+    // Корректно завершаем запись сессии и закрываем порты
+    state.logger.stop();
     state.serial1.close();
     state.serial2.close();
     ImGui_ImplOpenGL3_Shutdown();

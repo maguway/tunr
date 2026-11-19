@@ -24,8 +24,17 @@ FetchContent_Declare(imgui
 FetchContent_MakeAvailable(imgui)
 
 # =============================================
-set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/vendor/imgui-src)
-set(GLFW_DIR  ${CMAKE_SOURCE_DIR}/vendor/glfw-src)
+# FetchContent выставляет <имя>_SOURCE_DIR; запасной вариант - прежние жёстко заданные пути.
+if(imgui_SOURCE_DIR)
+    set(IMGUI_DIR ${imgui_SOURCE_DIR})
+else()
+    set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/vendor/imgui-src)
+endif()
+if(glfw_SOURCE_DIR)
+    set(GLFW_DIR ${glfw_SOURCE_DIR})
+else()
+    set(GLFW_DIR ${CMAKE_SOURCE_DIR}/vendor/glfw-src)
+endif()
 
 if(NOT EXISTS ${IMGUI_DIR}/imgui.h)
     message(FATAL_ERROR "imgui.h not found")
@@ -41,9 +50,10 @@ add_executable(turn
         src/SerialPortManager.cpp
         src/ui_device.cpp
         src/ui_graph.cpp
+        src/SessionLogger.cpp
 )
 
-# ВОТ ЗДЕСЬ МЫ ДОБАВИЛИ ПУТИ К IMGUI И GLFW
+# Пути к заголовкам проекта, ImGui и GLFW
 target_include_directories(turn PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${IMGUI_DIR}
@@ -63,7 +73,8 @@ target_sources(turn PRIVATE
 
 target_link_libraries(turn PRIVATE glfw opengl32)
 
-if(WIN32)
+# Флаги статической линковки - только для GCC/MinGW (для MSVC они не подходят)
+if(WIN32 AND NOT MSVC)
     target_link_options(turn PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
 
