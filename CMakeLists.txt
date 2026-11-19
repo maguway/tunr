@@ -51,6 +51,7 @@ add_executable(turn
         src/ui_device.cpp
         src/ui_graph.cpp
         src/SessionLogger.cpp
+        src/AppSettings.cpp
 )
 
 # Пути к заголовкам проекта, ImGui и GLFW
