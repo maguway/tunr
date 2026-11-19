@@ -1,0 +1,1621 @@
+// files\turn\CMakeLists.txt
+cmake_minimum_required(VERSION 3.20)
+project(turn LANGUAGES C CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+set(FETCHCONTENT_BASE_DIR ${CMAKE_SOURCE_DIR}/vendor)
+include(FetchContent)
+
+# ========== GLFW ==========
+FetchContent_Declare(glfw
+        GIT_REPOSITORY https://github.com/glfw/glfw.git
+        GIT_TAG 3.4
+        GIT_SHALLOW TRUE)
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(glfw)
+
+# ========== ImGui ==========
+FetchContent_Declare(imgui
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG docking
+        GIT_SHALLOW TRUE)
+FetchContent_MakeAvailable(imgui)
+
+# =============================================
+# FetchContent выставляет <имя>_SOURCE_DIR; запасной вариант - прежние жёстко заданные пути.
+if(imgui_SOURCE_DIR)
+    set(IMGUI_DIR ${imgui_SOURCE_DIR})
+else()
+    set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/vendor/imgui-src)
+endif()
+if(glfw_SOURCE_DIR)
+    set(GLFW_DIR ${glfw_SOURCE_DIR})
+else()
+    set(GLFW_DIR ${CMAKE_SOURCE_DIR}/vendor/glfw-src)
+endif()
+
+if(NOT EXISTS ${IMGUI_DIR}/imgui.h)
+    message(FATAL_ERROR "imgui.h not found")
+endif()
+if(NOT EXISTS ${GLFW_DIR}/include/GLFW/glfw3.h)
+    message(FATAL_ERROR "glfw3.h not found")
+endif()
+message(STATUS "✅ All headers found!")
+
+# ========== Executable ==========
+add_executable(turn
+        main.cpp
+        src/SerialPortManager.cpp
+        src/ui_device.cpp
+        src/ui_graph.cpp
+        src/SessionLogger.cpp
+)
+
+# Пути к заголовкам проекта, ImGui и GLFW
+target_include_directories(turn PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${IMGUI_DIR}
+        ${IMGUI_DIR}/backends
+        ${GLFW_DIR}/include
+)
+
+target_sources(turn PRIVATE
+        ${IMGUI_DIR}/imgui.cpp
+        ${IMGUI_DIR}/imgui_demo.cpp
+        ${IMGUI_DIR}/imgui_draw.cpp
+        ${IMGUI_DIR}/imgui_tables.cpp
+        ${IMGUI_DIR}/imgui_widgets.cpp
+        ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+        ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+)
+
+target_link_libraries(turn PRIVATE glfw opengl32)
+
+# Флаги статической линковки - только для GCC/MinGW (для MSVC они не подходят)
+if(WIN32 AND NOT MSVC)
+    target_link_options(turn PRIVATE -static -static-libgcc -static-libstdc++)
+endif()
+
+if(MSVC)
+    target_compile_options(turn PRIVATE /utf-8)
+endif()
+
+
+
+
+// files\turn\main.cpp
+#include "imgui.h"
+#include "imgui_impl_glfw.h"
+#include "imgui_impl_opengl3.h"
+#include <GLFW/glfw3.h>
+#include "ui_device.h"
+#include "ui_graph.h"
+
+int main()
+{
+    if (!glfwInit()) return -1;
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+    GLFWwindow* window = glfwCreateWindow(1400, 750, "Turn - Dual Monitor", nullptr, nullptr);
+    if (!window)
+    {
+        glfwTerminate();
+        return -1;
+    }
+    glfwMakeContextCurrent(window);
+    glfwSwapInterval(1);
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    ImGui::StyleColorsDark();
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL3_Init("#version 130");
+
+    AppState state;
+    state.serial2.setParseMarker(false); // Отключаем маркер для второго устройства
+
+    // ВКЛЮЧАЕМ НОВЫЙ РЕЖИМ ДЛЯ ПЕРВОГО УСТРОЙСТВА
+    state.serial1.setParseMode(ParseMode::RawFloat);
+
+    // Передаем общий логгер сессии в порты (1 = Dev1, 2 = Dev2)
+    state.serial1.setSessionLogger(&state.logger, 1);
+    state.serial2.setSessionLogger(&state.logger, 2);
+
+    while (!glfwWindowShouldClose(window))
+    {
+        glfwPollEvents();
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+
+        ImGui::SetNextWindowPos(ImVec2(0, 0));
+        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+        ImGui::Begin("Dual Serial Monitor", nullptr,
+                     ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+        // Верхняя панель с портами (доступна на всех вкладках)
+        DrawTopBar(state);
+        ImGui::Separator();
+
+        if (ImGui::BeginTabBar("MainTabs"))
+        {
+            if (ImGui::BeginTabItem("Monitor"))
+            {
+                DrawDeviceTab(state);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem("Angle Graph"))
+            {
+                DrawGraphTab(state);
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
+
+        ImGui::End();
+        ImGui::Render();
+        int display_w, display_h;
+        glfwGetFramebufferSize(window, &display_w, &display_h);
+        glViewport(0, 0, display_w, display_h);
+        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+        glfwSwapBuffers(window);
+    }
+
+    // Корректно завершаем запись сессии и закрываем порты
+    state.logger.stop();
+    state.serial1.close();
+    state.serial2.close();
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    return 0;
+}
+
+
+
+
+// files\turn\src\SerialPortManager.cpp
+#include "SerialPortManager.h"
+#include "SessionLogger.h"
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+#include <cmath>
+#include <cstring>
+
+namespace {
+
+// Текст ошибки Windows на английском (шрифт ImGui по умолчанию не содержит кириллицу).
+std::string winErrorText(DWORD code) {
+    wchar_t buf[256] = {0};
+    const DWORD n = FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                                   nullptr, code, MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US),
+                                   buf, 255, nullptr);
+    std::string text;
+    if (n > 0) {
+        char out[512] = {0};
+        const int len = WideCharToMultiByte(CP_UTF8, 0, buf, static_cast<int>(n),
+                                            out, static_cast<int>(sizeof(out)) - 1, nullptr, nullptr);
+        if (len > 0) text.assign(out, static_cast<size_t>(len));
+        while (!text.empty() && (text.back() == '\r' || text.back() == '\n' ||
+                                 text.back() == ' ' || text.back() == '.')) {
+            text.pop_back();
+        }
+    }
+    if (text.empty()) text = "Error";
+    return text + " (code " + std::to_string(static_cast<unsigned long>(code)) + ")";
+}
+
+// Ошибки ReadFile, после которых порт точно "мёртв" (устройство отключили и т.п.).
+bool isFatalCommError(DWORD err) {
+    return err == ERROR_ACCESS_DENIED || err == ERROR_GEN_FAILURE ||
+           err == ERROR_DEVICE_NOT_CONNECTED || err == ERROR_FILE_NOT_FOUND ||
+           err == ERROR_INVALID_HANDLE;
+}
+
+constexpr size_t kPacketBytes = 24; // Dev2: 6 float подряд
+
+} // namespace
+
+SerialPortManager::SerialPortManager() = default;
+
+SerialPortManager::~SerialPortManager() {
+    close();
+    stopRecording();
+}
+
+std::vector<std::string> SerialPortManager::getAvailablePorts() {
+    std::vector<std::string> ports;
+    typedef DWORD(WINAPI * GetCommPortsFn)(PULONG, ULONG, PULONG);
+    HMODULE hKernel = GetModuleHandleW(L"kernel32.dll");
+    if (hKernel) {
+        auto fn = (GetCommPortsFn) GetProcAddress(hKernel, "GetCommPorts");
+        if (fn) {
+            ULONG buf[256];
+            ULONG count = 0;
+            if (fn(buf, 256, &count) == ERROR_SUCCESS) {
+                for (ULONG i = 0; i < count; ++i) {
+                    ports.push_back("COM" + std::to_string(buf[i]));
+                }
+                return ports;
+            }
+        }
+    }
+
+    // Запасной вариант для старых систем: пробуем открыть COM1..COM256.
+    for (int i = 1; i <= 256; ++i) {
+        std::string name = "COM" + std::to_string(i);
+        std::wstring wname(name.begin(), name.end());
+        std::wstring path = L"\\\\.\\" + wname;
+        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                               0, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            ports.push_back(name);
+            CloseHandle(h);
+        } else if (GetLastError() == ERROR_ACCESS_DENIED) {
+            // Порт существует, но уже открыт (в том числе нами) - он не должен пропадать из списка.
+            ports.push_back(name);
+        }
+    }
+    return ports;
+}
+
+bool SerialPortManager::open(const std::string &portName, int baudRate) {
+    close();
+    setError(std::string());
+
+    std::wstring wname(portName.begin(), portName.end());
+    std::wstring path = L"\\\\.\\" + wname;
+
+    HANDLE h = CreateFileW(path.c_str(),
+                           GENERIC_READ | GENERIC_WRITE,
+                           0, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        setError(winErrorText(GetLastError()));
+        return false;
+    }
+
+    DCB dcb{};
+    dcb.DCBlength = sizeof(dcb);
+    if (!GetCommState(h, &dcb)) {
+        setError(winErrorText(GetLastError()));
+        CloseHandle(h);
+        return false;
+    }
+    dcb.BaudRate = baudRate;
+    dcb.ByteSize = 8;
+    dcb.Parity = NOPARITY;
+    dcb.StopBits = ONESTOPBIT;
+    dcb.fBinary = TRUE;
+    dcb.fParity = FALSE;
+    // Явно отключаем программное/аппаратное управление потоком и "abort on error":
+    // иначе настройки, оставленные другой программой, могут съедать байты 0x11/0x13
+    // или блокировать чтение после первой ошибки приёма.
+    dcb.fOutxCtsFlow = FALSE;
+    dcb.fOutxDsrFlow = FALSE;
+    dcb.fOutX = FALSE;
+    dcb.fInX = FALSE;
+    dcb.fAbortOnError = FALSE;
+    if (!SetCommState(h, &dcb)) {
+        setError(winErrorText(GetLastError()));
+        CloseHandle(h);
+        return false;
+    }
+
+    COMMTIMEOUTS timeouts{};
+    timeouts.ReadIntervalTimeout = 50;
+    timeouts.ReadTotalTimeoutConstant = 50;
+    timeouts.ReadTotalTimeoutMultiplier = 0;
+    timeouts.WriteTotalTimeoutConstant = 50;
+    timeouts.WriteTotalTimeoutMultiplier = 0;
+    SetCommTimeouts(h, &timeouts);
+
+    m_lost = false;
+    m_handle = h;
+    m_running = true;
+    m_reader = std::thread(&SerialPortManager::readLoop, this);
+    return true;
+}
+
+void SerialPortManager::close() {
+    m_running = false;
+    if (m_reader.joinable())
+        m_reader.join();
+    if (m_handle) {
+        CloseHandle((HANDLE) m_handle);
+        m_handle = nullptr;
+    }
+    m_lost = false;
+}
+
+bool SerialPortManager::isOpen() const {
+    return m_handle != nullptr && !m_lost;
+}
+
+bool SerialPortManager::connectionLost() const {
+    return m_handle != nullptr && m_lost;
+}
+
+std::string SerialPortManager::lastError() const {
+    std::lock_guard<std::mutex> lock(m_errMutex);
+    return m_lastError;
+}
+
+void SerialPortManager::setError(const std::string &text) {
+    std::lock_guard<std::mutex> lock(m_errMutex);
+    m_lastError = text;
+}
+
+void SerialPortManager::markLost(unsigned long errorCode) {
+    setError("Connection lost: " + winErrorText(static_cast<DWORD>(errorCode)));
+    m_lost = true;
+    m_running = false;
+}
+
+void SerialPortManager::clearBuffer() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_rawBuffer.clear();
+    m_displayText.clear();
+    m_byteCountForNewLine = 0;
+    m_logPendingBytes = 0;
+}
+
+std::string SerialPortManager::getFormattedData() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_displayText;
+}
+
+std::vector<unsigned char> SerialPortManager::getRawData() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_rawBuffer;
+}
+
+std::vector<unsigned char> SerialPortManager::getTailBytes(size_t count) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (count == 0 || m_rawBuffer.size() < count)
+        return {};
+    return std::vector<unsigned char>(m_rawBuffer.end() - static_cast<std::ptrdiff_t>(count),
+                                      m_rawBuffer.end());
+}
+
+void SerialPortManager::readLoop() {
+    unsigned char tmp[1024];
+    unsigned int consecutiveFailures = 0;
+    HANDLE h = (HANDLE) m_handle;
+
+    while (m_running) {
+        DWORD read = 0;
+        BOOL ok = ReadFile(h, tmp, sizeof(tmp), &read, nullptr);
+        if (!ok) {
+            const DWORD err = GetLastError();
+            // Подтверждаем ошибку приёма (overrun/framing), чтобы драйвер продолжил работу.
+            DWORD commErrors = 0;
+            COMSTAT stat{};
+            ClearCommError(h, &commErrors, &stat);
+
+            if (isFatalCommError(err) || ++consecutiveFailures > 100) {
+                markLost(err); // устройство пропало: UI увидит isOpen() == false
+                break;
+            }
+            Sleep(10);
+            continue;
+        }
+        consecutiveFailures = 0;
+
+        if (read == 0) { // таймаут чтения, данных нет
+            Sleep(10);
+            continue;
+        }
+
+        // Старая запись "сырого" лога конкретного устройства (кнопки Rec/Stop)
+        {
+            std::lock_guard<std::mutex> logLock(m_logMutex);
+            if (m_logFile) {
+                for (DWORD i = 0; i < read; ++i) {
+                    fprintf(m_logFile, "%02X ", tmp[i]);
+                    if ((i + 1) % 16 == 0) fprintf(m_logFile, "\n");
+                }
+                fflush(m_logFile);
+            }
+        }
+
+        // Данные для общего лога сессии собираем под мьютексом,
+        // а саму запись (с flush на диск) делаем уже ПОСЛЕ его освобождения,
+        // чтобы не блокировать UI на время записи файла.
+        SessionLogger *logger = m_logger.load();
+        const bool sessionActive = (logger != nullptr) && logger->isRecording();
+        int logDevice = 0;
+        float logAngle = 0.0f;
+        std::vector<float> logValues;
+
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_totalBytes += read;
+            m_rawBuffer.insert(m_rawBuffer.end(), tmp, tmp + read);
+            m_angleUpdated = false;
+            m_logPendingBytes += read;
+            parseAndFormat();
+
+            if (sessionActive) {
+                const ParseMode mode = m_parseMode.load();
+                int dev = m_deviceId.load();
+                if (dev == 0) {
+                    dev = (mode == ParseMode::RawFloat) ? 1 : (mode == ParseMode::RawOnly ? 2 : 0);
+                }
+
+                if (dev == 1 && mode != ParseMode::RawOnly) {
+                    // Устройство 1: пишем угол, только если в этом куске данных он реально обновился
+                    if (m_angleUpdated) {
+                        logDevice = 1;
+                        logAngle = m_currentAngle.load();
+                    }
+                } else if (dev == 2 && mode == ParseMode::RawOnly) {
+                    // Устройство 2 (пакет 24 байта): пишем, когда накопилось не меньше одного пакета
+                    // новых байт. Так неполные куски пакета не превращаются в мусорные строки.
+                    if (m_rawBuffer.size() >= kPacketBytes && m_logPendingBytes >= kPacketBytes) {
+                        logValues.resize(6);
+                        std::memcpy(logValues.data(), &m_rawBuffer[m_rawBuffer.size() - kPacketBytes],
+                                    kPacketBytes);
+                        logDevice = 2;
+                        m_logPendingBytes = 0;
+                    }
+                }
+            } else {
+                m_logPendingBytes = 0;
+            }
+        }
+
+        if (logDevice == 1) {
+            logger->logData(1, logAngle, {});
+        } else if (logDevice == 2) {
+            logger->logData(2, 0.0f, logValues);
+        }
+    }
+}
+
+// Переводит первые `count` байт буфера в hex-текст для окна лога и удаляет их из буфера.
+// Формат тот же, что и раньше: "xx " на байт, перенос строки после каждого 16-го байта.
+void SerialPortManager::consumeToDisplay(size_t count) {
+    if (count == 0) return;
+    if (count > m_rawBuffer.size()) count = m_rawBuffer.size();
+
+    static const char kHex[] = "0123456789abcdef";
+    std::string chunk;
+    chunk.reserve(count * 3 + count / 16 + 1);
+    for (size_t j = 0; j < count; ++j) {
+        const unsigned char b = m_rawBuffer[j];
+        chunk.push_back(kHex[b >> 4]);
+        chunk.push_back(kHex[b & 0x0F]);
+        chunk.push_back(' ');
+        m_byteCountForNewLine++;
+        if (m_byteCountForNewLine % 16 == 0) chunk.push_back('\n');
+    }
+    m_displayText += chunk;
+
+    const size_t MAX_DISPLAY = 65536;
+    if (m_displayText.size() > MAX_DISPLAY) {
+        m_displayText.erase(0, m_displayText.size() - MAX_DISPLAY);
+        size_t firstNewLine = m_displayText.find('\n');
+        if (firstNewLine != std::string::npos && firstNewLine < 20) {
+            m_displayText.erase(0, firstNewLine + 1);
+        }
+    }
+    m_rawBuffer.erase(m_rawBuffer.begin(), m_rawBuffer.begin() + static_cast<std::ptrdiff_t>(count));
+}
+
+void SerialPortManager::parseAndFormat() {
+    // Ограничение размера буфера действует во ВСЕХ режимах, включая RawOnly:
+    // раньше в RawOnly (Dev2) буфер рос бесконечно.
+    const size_t MAX_RAW_BUFFER = 1024 * 1024;
+    if (m_rawBuffer.size() > MAX_RAW_BUFFER) {
+        size_t eraseCount = m_rawBuffer.size() - (MAX_RAW_BUFFER / 2);
+        m_rawBuffer.erase(m_rawBuffer.begin(), m_rawBuffer.begin() + static_cast<std::ptrdiff_t>(eraseCount));
+    }
+
+    const ParseMode mode = m_parseMode.load();
+
+    // Если режим RawOnly - просто накапливаем данные и ничего не парсим.
+    // UI забирает последние байты через getTailBytes().
+    if (mode == ParseMode::RawOnly) {
+        return;
+    }
+
+    if (mode == ParseMode::Marker) {
+        size_t i = 0;
+        while (i + 3 < m_rawBuffer.size()) {
+            if (m_rawBuffer[i] == 0x23 && m_rawBuffer[i + 1] == 0x23) {
+                unsigned char high = m_rawBuffer[i + 2];
+                unsigned char low = m_rawBuffer[i + 3];
+                unsigned int raw = (static_cast<unsigned int>(high) << 8) | low;
+                m_rawValue = raw;
+                m_currentAngle = (static_cast<float>(raw) * 360.0f) / 4096.0f;
+                m_angleUpdated = true;
+                i += 4;
+            } else {
+                i++;
+            }
+        }
+
+        if (i > 0) {
+            if (i > m_rawBuffer.size() - 3) i = m_rawBuffer.size() > 3 ? m_rawBuffer.size() - 3 : 0;
+            consumeToDisplay(i);
+        }
+    } else if (mode == ParseMode::Raw16Bit) {
+        size_t i = 0;
+        while (i + 1 < m_rawBuffer.size()) {
+            unsigned char high = m_rawBuffer[i];
+            unsigned char low = m_rawBuffer[i + 1];
+            unsigned int val = (static_cast<unsigned int>(high) << 8) | low;
+            m_rawValue = val;
+            m_currentAngle = (static_cast<float>(val) * 360.0f) / 4096.0f;
+            m_angleUpdated = true;
+            i += 2;
+        }
+        consumeToDisplay(i);
+    } else if (mode == ParseMode::RawFloat) {
+        size_t i = 0;
+        while (i + 3 < m_rawBuffer.size()) {
+            float f;
+            std::memcpy(&f, &m_rawBuffer[i], sizeof(float));
+            if (f >= -360.0f && f <= 720.0f) {
+                m_currentAngle = f;
+                const float scaled = f * 4096.0f / 360.0f;
+                // Приведение float -> unsigned для значений <= -1 было неопределённым поведением
+                // (получался мусор вроде 4294965069). Для scaled > -1 (в т.ч. все f >= 0) результат
+                // прежний и корректно определён; более отрицательные углы приводятся к 0..4095
+                // (как угол по модулю 360).
+                if (scaled > -1.0f) {
+                    m_rawValue = static_cast<unsigned int>(scaled);
+                } else {
+                    m_rawValue = static_cast<unsigned int>(static_cast<int>(std::floor(scaled)) + 4096);
+                }
+                m_angleUpdated = true;
+            }
+            i += 4;
+        }
+        consumeToDisplay(i);
+    }
+}
+
+void SerialPortManager::startRecording(const std::string &filename) {
+    std::lock_guard<std::mutex> lock(m_logMutex);
+    if (m_logFile) {
+        fclose(m_logFile);
+    }
+    m_logFile = fopen(filename.c_str(), "w");
+}
+
+void SerialPortManager::stopRecording() {
+    std::lock_guard<std::mutex> lock(m_logMutex);
+    if (m_logFile) {
+        fclose(m_logFile);
+        m_logFile = nullptr;
+    }
+}
+
+bool SerialPortManager::isRecording() const {
+    std::lock_guard<std::mutex> lock(m_logMutex);
+    return m_logFile != nullptr;
+}
+
+void SerialPortManager::writeLogLine(const std::string &line) {
+    std::lock_guard<std::mutex> lock(m_logMutex);
+    if (m_logFile) {
+        fprintf(m_logFile, "%s\n", line.c_str());
+        fflush(m_logFile);
+    }
+}
+
+
+
+
+
+// files\turn\src\SerialPortManager.h
+#pragma once
+
+#include <atomic>
+#include <cstddef>
+#include <cstdio>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+class SessionLogger;
+
+enum class ParseMode {
+    Marker,   // Старый режим: ## + High + Low (для старого Dev1)
+    Raw16Bit, // 2 байта (High + Low) (новый Dev1, если не float)
+    RawFloat, // 4 байта float (новый Dev1, как на скрине)
+    RawOnly   // Просто накапливать сырые данные (для Dev2, как было раньше)
+};
+
+class SerialPortManager {
+public:
+    SerialPortManager();
+    ~SerialPortManager();
+
+    SerialPortManager(const SerialPortManager &) = delete;
+    SerialPortManager &operator=(const SerialPortManager &) = delete;
+
+    // Режим парсинга можно менять в любой момент (потокобезопасно).
+    void setParseMode(ParseMode mode) { m_parseMode = mode; }
+    // Оставлено для совместимости: false -> RawOnly, true -> Marker.
+    void setParseMarker(bool enable) { m_parseMode = enable ? ParseMode::Marker : ParseMode::RawOnly; }
+
+    std::vector<std::string> getAvailablePorts();
+
+    bool open(const std::string &portName, int baudRate = 115200);
+    void close();
+
+    // true только пока порт открыт И связь не потеряна.
+    bool isOpen() const;
+    // true, если порт был открыт, но устройство пропало (отключили кабель и т.п.).
+    bool connectionLost() const;
+    // Текст последней ошибки открытия/связи (пусто, если ошибок не было).
+    std::string lastError() const;
+
+    void clearBuffer();
+
+    std::string getFormattedData();
+    // Полная копия накопленного буфера (оставлено для совместимости; для UI лучше getTailBytes).
+    std::vector<unsigned char> getRawData();
+    // Последние `count` байт буфера одной короткой копией.
+    // Если в буфере меньше `count` байт, возвращает пустой вектор.
+    std::vector<unsigned char> getTailBytes(size_t count);
+    size_t totalBytesReceived() const { return m_totalBytes; }
+
+    float getCurrentAngle() const { return m_currentAngle; }
+    unsigned int getRawValue() const { return m_rawValue; }
+
+    // Запись "сырого" лога конкретного устройства (старые кнопки Rec/Stop)
+    void startRecording(const std::string &filename);
+    void stopRecording();
+    bool isRecording() const;
+    void writeLogLine(const std::string &line);
+
+    // Подключение общего логгера сессии.
+    // deviceId: 1 = Dev1 (угол), 2 = Dev2 (пакет из 6 float), 0 = определить по режиму парсинга
+    // (RawFloat -> 1, RawOnly -> 2). Вызывать до open().
+    void setSessionLogger(SessionLogger *logger, int deviceId = 0) {
+        m_logger = logger;
+        m_deviceId = deviceId;
+    }
+
+private:
+    void readLoop();
+    void parseAndFormat();                 // вызывать под m_mutex
+    void consumeToDisplay(size_t count);   // вызывать под m_mutex
+    void markLost(unsigned long errorCode);
+    void setError(const std::string &text);
+
+    void *m_handle = nullptr;
+    std::thread m_reader;
+    std::atomic<bool> m_running{false};
+    std::atomic<bool> m_lost{false};
+
+    mutable std::mutex m_mutex;
+    std::vector<unsigned char> m_rawBuffer;
+    std::string m_displayText;
+    std::atomic<size_t> m_totalBytes{0};
+
+    std::atomic<float> m_currentAngle{0.0f};
+    std::atomic<unsigned int> m_rawValue{0};
+    size_t m_byteCountForNewLine = 0; // под m_mutex
+    bool m_angleUpdated = false;      // под m_mutex: в последнем куске данных найден новый угол
+    size_t m_logPendingBytes = 0;     // под m_mutex: сколько байт пришло с момента последней записи в лог сессии
+
+    FILE *m_logFile = nullptr;
+    mutable std::mutex m_logMutex;
+
+    std::atomic<ParseMode> m_parseMode{ParseMode::Marker};
+
+    std::atomic<SessionLogger *> m_logger{nullptr};
+    std::atomic<int> m_deviceId{0};
+
+    mutable std::mutex m_errMutex;
+    std::string m_lastError;
+};
+
+
+
+
+
+// files\turn\src\SessionLogger.cpp
+#include "SessionLogger.h"
+
+#include <cstdio>
+#include <ctime>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
+
+namespace {
+
+// Текущее локальное время в виде строки. std::localtime не потокобезопасна,
+// поэтому вызывается только под мьютексом логгера (единственное место использования).
+std::string formatLocalTime(const char *fmt) {
+    std::time_t now_c = std::time(nullptr);
+    const std::tm *parts = std::localtime(&now_c);
+    if (!parts) return "unknown";
+    char buffer[80] = {0};
+    if (std::strftime(buffer, sizeof(buffer), fmt, parts) == 0) return "unknown";
+    return buffer;
+}
+
+// Если файл от предыдущей сессии уже существует и не пуст, переименовываем его,
+// чтобы новая запись не затирала старые данные. Любая ошибка здесь не критична:
+// в худшем случае поведение будет таким же, как раньше (файл перезапишется).
+void backupExistingFile(const std::string &filename) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path p(filename);
+
+    if (!fs::exists(p, ec) || ec) return;
+    const auto size = fs::file_size(p, ec);
+    if (ec || size == 0) return;
+
+    const std::string stamp = formatLocalTime("%Y%m%d_%H%M%S");
+    const fs::path dir = p.parent_path();
+    const std::string stem = p.stem().string();
+    const std::string ext = p.extension().string();
+
+    fs::path backup = dir / (stem + "_" + stamp + ext);
+    for (int n = 1; fs::exists(backup, ec) && n < 1000; ++n) {
+        backup = dir / (stem + "_" + stamp + "_" + std::to_string(n) + ext);
+    }
+    fs::rename(p, backup, ec);
+}
+
+} // namespace
+
+SessionLogger::SessionLogger() = default;
+
+SessionLogger::~SessionLogger() {
+    stop();
+}
+
+bool SessionLogger::start(const std::string &filename) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_is_recording) return false; // уже пишем
+
+    m_last_error.clear();
+    backupExistingFile(filename);
+
+    m_file.clear(); // сбрасываем флаги ошибок после возможной прошлой неудачи
+    m_file.open(filename);
+    if (!m_file.is_open()) {
+        m_last_error = "Cannot open " + filename;
+        return false;
+    }
+
+    m_start_time = std::chrono::steady_clock::now();
+    writeHeader();
+    m_is_recording = true;
+    return true;
+}
+
+void SessionLogger::stop() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_is_recording) {
+        m_is_recording = false;
+    }
+    if (m_file.is_open()) {
+        m_file.close();
+    }
+}
+
+std::string SessionLogger::lastError() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_last_error;
+}
+
+void SessionLogger::writeHeader() {
+    // Печатаем текущую дату и время для шапки
+    const std::string buffer = formatLocalTime("%Y-%m-%d %H:%M:%S");
+
+    m_file << "# =========================================================\n";
+    m_file << "# TURN - DUAL MONITOR SESSION LOG\n";
+    m_file << "# Date: " << buffer << "\n";
+    m_file << "# =========================================================\n\n";
+
+    // Заголовки колонок
+    m_file << "Time(s); Dev1_Angle; Dev2_Angle; Dev2_X; Dev2_Y; Dev2_Dist; Dev2_Power; Dev2_Res\n";
+    m_file.flush();
+}
+
+void SessionLogger::logData(int device_id, float angle1, const std::vector<float> &dev2_vals) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!m_is_recording || !m_file.is_open()) return;
+
+    // Вычисляем время с начала записи в секундах (double: миллисекунды не теряются на длинных сессиях)
+    const auto now = std::chrono::steady_clock::now();
+    const std::chrono::duration<double> elapsed = now - m_start_time;
+    const double time_s = elapsed.count();
+
+    // Формируем строку с фиксированной шириной для красоты
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3) << std::setw(8) << time_s << ";";
+
+    if (device_id == 1) {
+        // Пишем угол первого устройства, остальные колонки пустые
+        oss << std::setprecision(2) << std::setw(10) << angle1 << ";";
+        oss << "          ;          ;          ;          ;          ;          ";
+    } else if (device_id == 2 && dev2_vals.size() >= 6) {
+        // Пишем данные второго устройства
+        oss << "          ;"; // Dev1_Angle пустой
+        oss << std::setprecision(2) << std::setw(10) << dev2_vals[0] << ";"; // Angle
+        oss << std::setprecision(4) << std::setw(10) << dev2_vals[1] << ";"; // X
+        oss << std::setprecision(4) << std::setw(10) << dev2_vals[2] << ";"; // Y
+        oss << std::setprecision(4) << std::setw(10) << dev2_vals[3] << ";"; // Dist
+        // Power: на вкладке Monitor он выводится как %.2e, значит может быть очень малым/большим.
+        // Формат %.2f превратил бы такие значения в 0.00, поэтому здесь общий формат (6 значащих цифр).
+        // Для обычных значений (например 55.3) число читается так же, как раньше.
+        oss << std::defaultfloat << std::setprecision(6) << std::setw(10) << dev2_vals[4] << ";"; // Power
+        oss << std::fixed << std::setprecision(2) << std::setw(10) << dev2_vals[5];               // Res
+    }
+
+    m_file << oss.str() << "\n";
+    m_file.flush(); // Сбрасываем на диск, чтобы при сбое питания данные не потерялись
+
+    if (!m_file) {
+        // Диск полон / файл недоступен: корректно останавливаем запись и сообщаем об ошибке
+        m_last_error = "Write to session log failed";
+        m_is_recording = false;
+        m_file.close();
+    }
+}
+
+
+
+
+
+// files\turn\src\SessionLogger.h
+#pragma once
+
+#include <atomic>
+#include <chrono>
+#include <fstream>
+#include <mutex>
+#include <string>
+#include <vector>
+
+// Общий лог сессии: оба устройства пишутся в один CSV-файл (разделитель ';').
+// Формат файла не менялся: шапка, колонки Time(s); Dev1_Angle; Dev2_*.
+class SessionLogger {
+public:
+    SessionLogger();
+    ~SessionLogger();
+
+    SessionLogger(const SessionLogger &) = delete;
+    SessionLogger &operator=(const SessionLogger &) = delete;
+
+    // Начать запись. Если файл с таким именем уже есть, он НЕ затирается,
+    // а переименовывается в <имя>_ГГГГММДД_ЧЧММСС.<расширение>.
+    bool start(const std::string &filename);
+    void stop();
+
+    // Не блокирует (atomic), можно вызывать из любого потока.
+    bool isRecording() const { return m_is_recording.load(); }
+
+    // device_id = 1 -> пишется angle1, device_id = 2 -> пишутся dev2_vals (6 значений).
+    void logData(int device_id, float angle1, const std::vector<float> &dev2_vals);
+
+    // Текст последней ошибки (пустой, если всё хорошо).
+    std::string lastError() const;
+
+private:
+    void writeHeader();
+
+    std::ofstream m_file;
+    mutable std::mutex m_mutex;
+    std::atomic<bool> m_is_recording{false};
+    std::chrono::steady_clock::time_point m_start_time;
+    std::string m_last_error;
+};
+
+
+
+
+
+// files\turn\src\ui_device.cpp
+#include "ui_device.h"
+#include "imgui.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+
+static const int baudRates[] = {9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600};
+
+static const ImVec4 COL_DEV1 = ImVec4(0.4f, 0.8f, 0.4f, 1.0f);
+static const ImVec4 COL_DEV2 = ImVec4(0.4f, 0.6f, 1.0f, 1.0f);
+static const ImVec4 COL_REC = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+
+// Обновляем кэш портов раз в секунду.
+// Вызывается из DrawTopBar, поэтому работает на ЛЮБОЙ вкладке (раньше - только на Monitor).
+static void RefreshPortCache(AppState &state) {
+    const double now = ImGui::GetTime();
+    if (now - state.lastPortRefresh <= 1.0) return;
+
+    state.cachedPorts = state.serial1.getAvailablePorts();
+    state.lastPortRefresh = now;
+
+    // Если выбранный порт исчез из системы (и порт уже не открыт/связь потеряна),
+    // освобождаем его и сбрасываем выбор. Теперь это делается для ОБОИХ устройств.
+    auto dropIfGone = [&](SerialPortManager &serial, std::string &portName) {
+        if (portName.empty() || serial.isOpen()) return;
+        const bool found = std::find(state.cachedPorts.begin(), state.cachedPorts.end(), portName)
+                           != state.cachedPorts.end();
+        if (!found) {
+            serial.close();
+            portName.clear();
+        }
+    };
+    dropIfGone(state.serial1, state.selectedPortName1);
+    dropIfGone(state.serial2, state.selectedPortName2);
+}
+
+// Круглый индикатор со стрелкой (угол в градусах, 0 - вертикаль вверх, по часовой стрелке).
+static void DrawDial(float angleDeg, ImU32 arrowColor) {
+    ImDrawList *draw_list = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    const float radius = 50.0f;
+    ImVec2 center = ImVec2(p.x + radius + 10, p.y + radius + 10);
+    draw_list->AddCircleFilled(center, radius, IM_COL32(50, 50, 50, 255));
+    draw_list->AddCircle(center, radius, IM_COL32(200, 200, 200, 255), 0, 2.0f);
+    if (!std::isfinite(angleDeg)) angleDeg = 0.0f; // мусорные байты не должны ломать отрисовку
+    const float angle_rad = (angleDeg - 90.0f) * (3.14159265f / 180.0f);
+    ImVec2 arrow_end = ImVec2(center.x + (radius - 10.0f) * cosf(angle_rad),
+                              center.y + (radius - 10.0f) * sinf(angle_rad));
+    draw_list->AddLine(center, arrow_end, arrowColor, 3.0f);
+    ImGui::Dummy(ImVec2(radius * 2 + 20, radius * 2 + 20));
+}
+
+// Красный кружок + текст "REC" (символ "●" отсутствует в шрифте ImGui по умолчанию и рисовался как "?").
+static void DrawRecIndicator() {
+    const float h = ImGui::GetTextLineHeight();
+    ImVec2 pos = ImGui::GetCursorScreenPos();
+    ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(pos.x + h * 0.5f, pos.y + h * 0.5f), h * 0.3f,
+                                                IM_COL32(255, 77, 77, 255));
+    ImGui::Dummy(ImVec2(h, h));
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::TextColored(COL_REC, "REC");
+}
+
+void DrawDeviceTab(AppState &state) {
+    RefreshPortCache(state);
+
+    // ==========================================
+    // ЛЕВАЯ КОЛОНКА (Устройство 1)
+    // ==========================================
+    ImGui::BeginChild("##device1", ImVec2(ImGui::GetContentRegionAvail().x * 0.5f - 5.0f, 0),
+                      ImGuiChildFlags_Borders | ImGuiChildFlags_ResizeX);
+
+    ImGui::TextColored(COL_DEV1, "DEVICE 1 (Turn Mechanism)");
+    ImGui::Separator();
+
+    // Данные устройства 1
+    const float angle1 = state.serial1.getCurrentAngle();
+    DrawDial(angle1, IM_COL32(255, 100, 100, 255));
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::SetWindowFontScale(1.5f);
+    ImGui::TextColored(COL_DEV1, "Angle: %.2f", angle1);
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::Text("Raw: %u", state.serial1.getRawValue());
+    ImGui::EndGroup();
+    ImGui::Separator();
+
+    // Лог устройства 1
+    ImGui::BeginChild("##log1", ImVec2(0, 0), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+    const std::string displayData1 = state.serial1.getFormattedData();
+    ImGui::TextUnformatted(displayData1.c_str(), displayData1.c_str() + displayData1.size());
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f) ImGui::SetScrollHereY(1.0f);
+    ImGui::EndChild();
+
+    ImGui::EndChild(); // Конец левой колонки
+
+    ImGui::SameLine();
+
+    // ==========================================
+    // ПРАВАЯ КОЛОНКА (Устройство 2)
+    // ==========================================
+    ImGui::BeginChild("##device2", ImVec2(0, 0), ImGuiChildFlags_Borders);
+
+    ImGui::TextColored(COL_DEV2, "DEVICE 2 (Incoming Info)");
+    ImGui::Separator();
+    ImGui::Separator();
+
+    // Данные устройства 2 (стрелка + показания).
+    // Берём только последние 24 байта (одна короткая копия), а не весь накопленный буфер.
+    float *vals2 = state.dev2Vals;
+    const std::vector<unsigned char> raw2 = state.serial2.getTailBytes(24);
+    if (raw2.size() >= 24) {
+        for (int i = 0; i < 6; ++i) {
+            std::memcpy(&vals2[i], &raw2[i * 4], 4);
+        }
+    }
+
+    DrawDial(vals2[0], IM_COL32(100, 150, 255, 255));
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::SetWindowFontScale(1.2f);
+    ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Angle: %.2f deg", vals2[0]);
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::Text("X: %.4f", vals2[1]);
+    ImGui::Text("Y: %.4f", vals2[2]);
+    ImGui::Text("Dist: %.4f", vals2[3]);
+    ImGui::Text("Power: %.2e", vals2[4]);
+    ImGui::EndGroup();
+    ImGui::Separator();
+
+    // Лог устройства 2
+    ImGui::BeginChild("##log2", ImVec2(0, 0), ImGuiChildFlags_Borders, ImGuiWindowFlags_HorizontalScrollbar);
+    const size_t totalBytes = state.serial2.totalBytesReceived();
+
+    if (raw2.size() >= 24 && totalBytes != state.dev2LastTotalBytes) {
+        state.dev2LastTotalBytes = totalBytes;
+        std::string hexStr;
+        for (size_t j = 0; j < raw2.size(); ++j) {
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%02X ", raw2[j]);
+            hexStr += buf;
+        }
+        char parsedStr[256];
+        snprintf(parsedStr, sizeof(parsedStr), " | Angle: %.2f, X: %.2f, Y: %.2f, Dist: %.2f, Power: %.2e, Res: %.2f",
+                 vals2[0], vals2[1], vals2[2], vals2[3], vals2[4], vals2[5]);
+        state.dev2Log += hexStr + parsedStr + "\n";
+
+        if (state.serial2.isRecording()) state.serial2.writeLogLine(hexStr + parsedStr);
+
+        const size_t maxLogSize = 256 * 1024;
+        if (state.dev2Log.size() > maxLogSize) {
+            size_t cutPos = state.dev2Log.find('\n', state.dev2Log.size() - maxLogSize);
+            if (cutPos != std::string::npos) state.dev2Log.erase(0, cutPos + 1);
+            else state.dev2Log.clear();
+        }
+    }
+    ImGui::TextUnformatted(state.dev2Log.c_str(), state.dev2Log.c_str() + state.dev2Log.size());
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f) ImGui::SetScrollHereY(1.0f);
+    ImGui::EndChild();
+
+    ImGui::EndChild(); // Конец правой колонки
+}
+
+// Блок управления одним устройством: выбор порта, скорость, Rec/Stop, Clear, статус.
+// Идентификаторы ImGui (##port1, ##baud1, Rec##1, Stop##1, Clear##1 и т.д.) те же, что и раньше.
+// uiLogToClear - необязательный текст лога в окне, который тоже очищается кнопкой Clear.
+static void DrawPortControls(AppState &state, int idx, const char *title, const ImVec4 &color,
+                             SerialPortManager &serial, std::string &portName, int &baudRate,
+                             const char *recFile, std::string *uiLogToClear) {
+    char id[32];
+
+    ImGui::BeginGroup();
+    ImGui::TextColored(color, "%s", title);
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(100);
+    const char *preview = portName.empty() ? "Select port..." : portName.c_str();
+    std::snprintf(id, sizeof(id), "##port%d", idx);
+    if (ImGui::BeginCombo(id, preview)) {
+        for (int i = 0; i < (int) state.cachedPorts.size(); ++i) {
+            bool isSelected = (portName == state.cachedPorts[i]);
+            if (ImGui::Selectable(state.cachedPorts[i].c_str(), isSelected)) {
+                portName = state.cachedPorts[i];
+                serial.close();
+                serial.open(portName, baudRate);
+            }
+            if (isSelected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80);
+    std::snprintf(id, sizeof(id), "##baud%d", idx);
+    if (ImGui::BeginCombo(id, std::to_string(baudRate).c_str())) {
+        for (int rate: baudRates) {
+            bool isSelected = (baudRate == rate);
+            if (ImGui::Selectable(std::to_string(rate).c_str(), isSelected)) {
+                baudRate = rate;
+                if (!portName.empty()) {
+                    serial.close();
+                    serial.open(portName, baudRate);
+                }
+            }
+            if (isSelected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::SameLine();
+
+    // Старая кнопка Rec для устройства (оставим для совместимости)
+    if (serial.isRecording()) {
+        std::snprintf(id, sizeof(id), "Stop##%d", idx);
+        if (ImGui::Button(id)) serial.stopRecording();
+        ImGui::SameLine();
+        ImGui::TextColored(COL_REC, "REC");
+    } else {
+        std::snprintf(id, sizeof(id), "Rec##%d", idx);
+        if (ImGui::Button(id)) serial.startRecording(recFile);
+    }
+    ImGui::SameLine();
+
+    // Очистка буфера и окна лога устройства
+    std::snprintf(id, sizeof(id), "Clear##%d", idx);
+    if (ImGui::Button(id)) {
+        serial.clearBuffer();
+        if (uiLogToClear) uiLogToClear->clear();
+    }
+    ImGui::SameLine();
+
+    const char *status = serial.isOpen() ? "Conn" : (serial.connectionLost() ? "Lost" : "Disc");
+    ImGui::Text("(%s)", status);
+    if (!serial.isOpen() && ImGui::IsItemHovered()) {
+        const std::string err = serial.lastError();
+        if (!err.empty()) ImGui::SetTooltip("%s", err.c_str());
+    }
+    ImGui::EndGroup();
+}
+
+void DrawTopBar(AppState &state) {
+    // Список портов обновляется здесь, поэтому он актуален на любой вкладке
+    RefreshPortCache(state);
+
+    // --- Левая половина (Устройство 1) ---
+    DrawPortControls(state, 1, "Dev 1:", COL_DEV1, state.serial1, state.selectedPortName1,
+                     state.selectedBaudRate1, "log_device1.txt", nullptr);
+
+    ImGui::SameLine();
+    ImGui::Dummy(ImVec2(10, 0)); // Отступ между устройствами
+    ImGui::SameLine();
+
+    // --- Правая половина (Устройство 2) ---
+    DrawPortControls(state, 2, "Dev 2:", COL_DEV2, state.serial2, state.selectedPortName2,
+                     state.selectedBaudRate2, "log_device2.txt", &state.dev2Log);
+
+    // --- Общая запись сессии (вне групп устройств) ---
+    ImGui::SameLine();
+    ImGui::Dummy(ImVec2(20, 0)); // Отступ
+    ImGui::SameLine();
+
+    if (state.logger.isRecording()) {
+        if (ImGui::Button("Stop Session", ImVec2(120, 0))) {
+            state.logger.stop();
+        }
+        ImGui::SameLine();
+        DrawRecIndicator();
+    } else {
+        if (ImGui::Button("Record Session", ImVec2(120, 0))) {
+            state.logger.start("session_log.csv");
+        }
+        // Если файл не удалось открыть или запись оборвалась - показываем причину
+        const std::string err = state.logger.lastError();
+        if (!err.empty()) {
+            ImGui::SameLine();
+            ImGui::TextColored(COL_REC, "%s", err.c_str());
+        }
+    }
+
+    ImGui::Separator();
+}
+
+
+
+
+
+// files\turn\src\ui_device.h
+#pragma once
+#include "SerialPortManager.h"
+#include "SessionLogger.h"
+#include <string>
+#include <vector>
+
+// Структура, которая хранит общие настройки и порты
+struct AppState
+{
+    // ВАЖНО: логгер объявлен ПЕРВЫМ. Члены уничтожаются в обратном порядке, поэтому
+    // он переживёт оба порта, и поток чтения никогда не обратится к уже разрушенному логгеру.
+    SessionLogger logger;
+
+    SerialPortManager serial1;
+    SerialPortManager serial2;
+    std::vector<std::string> cachedPorts;
+
+    std::string selectedPortName1;
+    int selectedBaudRate1 = 115200;
+
+    std::string selectedPortName2;
+    int selectedBaudRate2 = 115200;
+
+    double lastPortRefresh = -1.0;
+
+    // Состояние окна Dev2 (раньше хранилось в static-переменных внутри DrawDeviceTab)
+    float dev2Vals[6] = {0, 0, 0, 0, 0, 0}; // Angle, X, Y, Dist, Power, Res
+    std::string dev2Log;                    // текст лога Dev2 в окне
+    size_t dev2LastTotalBytes = 0;
+};
+
+// Функция отрисовки первой вкладки
+void DrawDeviceTab(AppState& state);
+
+// Функция отрисовки верхней панели (выбор портов и кнопки)
+void DrawTopBar(AppState& state);
+
+
+
+
+
+// files\turn\src\ui_graph.cpp
+#include "ui_graph.h"
+#include "imgui.h"
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <deque>
+#include <vector>
+
+static const float kPi = 3.14159265f;
+
+// Точка шлейфа хранится НЕ в пикселях, а в "координатах данных" (x, y),
+// поэтому шлейф корректно переживает изменение размера окна.
+//   Декартов график: x = angle1 / 360, y = angle2 / 360          (0..1)
+//   Полярный график: x, y - точка на единичном круге (радиус 0..1)
+// brk == true означает "разрыв": от предыдущей точки линия к этой не рисуется
+// (переход через 360° -> 0°, пауза в данных, смена режима и т.п.).
+struct TrailPoint {
+    float x;
+    float y;
+    double t;
+    bool brk;
+};
+
+static std::deque<TrailPoint> trailHistoryCartesian;
+static std::deque<TrailPoint> trailHistoryPolar;
+
+struct TrailSettings {
+    float duration = 1.5f;
+    bool infinite = false;
+};
+
+static TrailSettings g_trailCart;
+static TrailSettings g_trailPolar;
+
+static int g_radiusMode = 0;
+[[maybe_unused]] static float g_currentPowerRaw = 0.0f;
+
+// --- Настройки авто-нормализации ---
+[[maybe_unused]] static bool g_auto_scale_power = true;
+static float g_noise_floor_db = 100.0f;  // Текущий уровень шума (центр)
+static float g_dynamic_range_db = 40.0f; // На сколько дБ должен увеличиться сигнал, чтобы дойти до края
+// Скорость, с которой уровень шума "подтягивается" к текущему значению, когда сигнал выше него.
+// 16.67 с эквивалентно прежним 0.001 на кадр при 60 FPS, но теперь не зависит от частоты кадров.
+static const float kNoiseReleaseSeconds = 16.67f;
+
+// Максимум точек в шлейфе (раньше 5000 ≈ 83 с при 60 FPS, из-за чего слайдер до 600 с и "Infinite" не работали).
+static const size_t kMaxTrailPoints = 30000;
+
+// Для определения разрывов шлейфа
+static bool g_havePrevCart = false;
+static float g_prevCartA1 = 0.0f;
+static float g_prevCartA2 = 0.0f;
+static bool g_havePrevPolar = false;
+static float g_prevPolarRadius = 0.0f;
+
+static void ClearAllGraphs() {
+    trailHistoryCartesian.clear();
+    trailHistoryPolar.clear();
+    g_havePrevCart = false;
+    g_havePrevPolar = false;
+    // Сбрасываем авто-настройки
+    g_noise_floor_db = 100.0f;
+}
+
+static void PushTrailPoint(std::deque<TrailPoint> &history, float x, float y, bool forceBreak) {
+    const double now = ImGui::GetTime();
+    bool brk = forceBreak;
+
+    if (!history.empty()) {
+        TrailPoint &last = history.back();
+        // Давно не было точек (вкладка была скрыта) - не соединяем линией через весь график.
+        if (now - last.t > 0.5) brk = true;
+        // Точка не сдвинулась: новую не добавляем (не раздуваем историю), только "освежаем" время.
+        if (!brk && std::fabs(last.x - x) < 1e-5f && std::fabs(last.y - y) < 1e-5f) {
+            last.t = now;
+            return;
+        }
+    }
+    history.push_back({x, y, now, brk});
+}
+
+// offset/scale переводят координаты данных в пиксели: pixel = offset + (x * scale.x, y * scale.y)
+static void DrawTrail(ImDrawList *draw_list, std::deque<TrailPoint> &history,
+                      const TrailSettings &settings, ImU32 baseColor, float maxThickness,
+                      ImVec2 offset, ImVec2 scale) {
+    const double currentTime = ImGui::GetTime();
+    if (!settings.infinite) {
+        while (!history.empty() && (currentTime - history.front().t > settings.duration)) {
+            history.pop_front();
+        }
+    }
+    while (history.size() > kMaxTrailPoints) {
+        history.pop_front();
+    }
+
+    if (history.size() < 2) return;
+
+    const int cr = (baseColor >> IM_COL32_R_SHIFT) & 0xFF;
+    const int cg = (baseColor >> IM_COL32_G_SHIFT) & 0xFF;
+    const int cb = (baseColor >> IM_COL32_B_SHIFT) & 0xFF;
+
+    for (size_t i = 0; i + 1 < history.size(); ++i) {
+        const TrailPoint &a = history[i];
+        const TrailPoint &b = history[i + 1];
+        if (b.brk) continue; // разрыв: между a и b линию не рисуем
+
+        const float age = static_cast<float>(currentTime - a.t);
+        float lifeRatio;
+        if (settings.infinite) lifeRatio = 1.0f;
+        else lifeRatio = settings.duration > 0.0f ? (1.0f - (age / settings.duration)) : 0.0f;
+
+        if (lifeRatio > 0.0f) {
+            const float thickness = 0.5f + (maxThickness - 0.5f) * lifeRatio;
+            const float alpha = 200.0f * lifeRatio;
+            const ImU32 color = IM_COL32(cr, cg, cb, (int) alpha);
+            draw_list->AddLine(ImVec2(offset.x + a.x * scale.x, offset.y + a.y * scale.y),
+                               ImVec2(offset.x + b.x * scale.x, offset.y + b.y * scale.y),
+                               color, thickness);
+        }
+    }
+}
+
+void DrawGraphTab(AppState &state) {
+    float angle1 = state.serial1.getCurrentAngle();
+    float angle2 = 0.0f;
+    float power = 0.0f;
+
+    // Последние 24 байта Dev2 (одна короткая копия вместо копирования всего буфера каждый кадр)
+    static float lastAngle2 = 0.0f; // последние корректные значения на случай мусорных байтов (NaN/Inf)
+    static float lastPower = 0.0f;
+    const std::vector<unsigned char> raw2 = state.serial2.getTailBytes(24);
+    if (raw2.size() >= 24) {
+        std::memcpy(&angle2, &raw2[0], 4);
+        std::memcpy(&power, &raw2[16], 4);
+        if (std::isfinite(angle2)) lastAngle2 = angle2; else angle2 = lastAngle2;
+        if (std::isfinite(power)) lastPower = power; else power = lastPower;
+    }
+    if (!std::isfinite(angle1)) angle1 = 0.0f;
+    g_currentPowerRaw = power;
+
+    angle1 = fmodf(angle1, 360.0f);
+    if (angle1 < 0) angle1 += 360.0f;
+    angle2 = fmodf(angle2, 360.0f);
+    if (angle2 < 0) angle2 += 360.0f;
+
+    // --- Логика авто-нормализации мощности ---
+    // Уровень шума "прилипает" к минимуму: если сигнал ниже него, уровень сразу опускается.
+    // Если сигнал выше, уровень медленно подтягивается вверх к текущему значению
+    // (с постоянной времени kNoiseReleaseSeconds, не зависящей от FPS).
+    if (power < g_noise_floor_db) {
+        g_noise_floor_db = power;
+    } else {
+        const float dt = ImGui::GetIO().DeltaTime;
+        const float k = 1.0f - expf(-dt / kNoiseReleaseSeconds);
+        g_noise_floor_db += (power - g_noise_floor_db) * k;
+    }
+
+    // Вычисляем радиус для мощности
+    float radius_val_power = 0.0f;
+
+    // Считаем разницу между текущим сигналом и шумом
+    float diff_db = power - g_noise_floor_db;
+
+    // Нормируем: 0 дБ = 0, g_dynamic_range_db (40) и больше = 1.0
+    float normalized = diff_db / g_dynamic_range_db;
+    if (normalized < 0.0f) normalized = 0.0f;
+    if (normalized > 1.0f) normalized = 1.0f;
+
+    radius_val_power = normalized * 360.0f;
+
+    // --- Верхняя панель управления ---
+    ImGui::SetWindowFontScale(1.5f);
+    ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "X (Dev 1): %.2f", angle1);
+    ImGui::SameLine();
+    ImGui::Text(" | ");
+    ImGui::SameLine();
+    ImGui::TextColored(ImVec4(0.6f, 0.8f, 1.0f, 1.0f), "Y (Dev 2): %.2f", angle2);
+    ImGui::SameLine();
+    ImGui::Text(" | ");
+    ImGui::SameLine();
+
+    // Выводим сырую мощность и текущий уровень шума
+    ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "Power: %.1f (Noise: %.1f)",
+                       power, g_noise_floor_db);
+    ImGui::SetWindowFontScale(1.0f);
+
+    // Настройки шлейфа
+    ImGui::SetNextItemWidth(200.0f);
+    ImGui::SliderFloat("Trail duration (sec)", &g_trailCart.duration, 0.0f, 600.0f, "%.1f");
+
+    ImGui::SameLine();
+    ImGui::Checkbox("Infinite Trail", &g_trailCart.infinite);
+
+    ImGui::SameLine();
+    if (ImGui::Button("Clear Graph")) {
+        ClearAllGraphs();
+    }
+
+    ImGui::Separator();
+
+    // Радио-кнопки
+    ImGui::Text("Polar Radius Source:");
+    ImGui::SameLine();
+    ImGui::RadioButton("Angle 2", &g_radiusMode, 0);
+    ImGui::SameLine();
+    ImGui::RadioButton("|Angle 1 - Angle 2|", &g_radiusMode, 1);
+    ImGui::SameLine();
+    ImGui::RadioButton("Power", &g_radiusMode, 2);
+
+    // При смене источника радиуса старый полярный шлейф теряет смысл (другая геометрия) - очищаем его
+    static int lastRadiusMode = g_radiusMode;
+    if (g_radiusMode != lastRadiusMode) {
+        trailHistoryPolar.clear();
+        g_havePrevPolar = false;
+        lastRadiusMode = g_radiusMode;
+    }
+
+    ImGui::Separator();
+
+    g_trailPolar.duration = g_trailCart.duration;
+    g_trailPolar.infinite = g_trailCart.infinite;
+
+    ImDrawList *draw_list = ImGui::GetWindowDrawList();
+    ImVec2 p = ImGui::GetCursorScreenPos();
+
+    float availWidth = ImGui::GetContentRegionAvail().x;
+    float availHeight = ImGui::GetContentRegionAvail().y;
+    float halfWidth = availWidth * 0.5f;
+    float size = (halfWidth < availHeight ? halfWidth : availHeight) - 40.0f;
+    size = std::max(size, 50.0f); // в очень маленьком окне размер не должен стать отрицательным
+
+    // ЛЕВЫЙ ГРАФИК
+    ImVec2 origin = ImVec2(p.x + 50.0f, p.y + size + 20.0f);
+    ImVec2 topRight = ImVec2(origin.x + size, origin.y - size);
+
+    draw_list->AddRectFilled(topRight, origin, IM_COL32(25, 25, 25, 255));
+    draw_list->AddRect(topRight, origin, IM_COL32(100, 100, 100, 255), 0.0f, 0, 2.0f);
+
+    for (int i = 0; i <= 360; i += 45) {
+        float t = (float) i / 360.0f;
+        float xPos = origin.x + t * size;
+        float yPos = origin.y - t * size;
+        draw_list->AddLine(ImVec2(xPos, origin.y), ImVec2(xPos, topRight.y), IM_COL32(60, 60, 60, 255), 1.0f);
+        draw_list->AddLine(ImVec2(origin.x, yPos), ImVec2(topRight.x, yPos), IM_COL32(60, 60, 60, 255), 1.0f);
+        if (i % 90 == 0) {
+            char label[16];
+            snprintf(label, sizeof(label), "%d", i);
+            ImVec2 textSize = ImGui::CalcTextSize(label);
+            draw_list->AddText(ImVec2(xPos - textSize.x * 0.5f, origin.y + 5.0f), IM_COL32(150, 150, 150, 255), label);
+            draw_list->AddText(ImVec2(origin.x - textSize.x - 10.0f, yPos - textSize.y * 0.5f),
+                               IM_COL32(150, 150, 150, 255), label);
+        }
+    }
+
+    ImVec2 ptX = ImVec2(origin.x + (angle1 / 360.0f) * size, origin.y);
+    ImVec2 ptY = ImVec2(origin.x, origin.y - (angle2 / 360.0f) * size);
+    ImVec2 intersect = ImVec2(ptX.x, ptY.y);
+
+    draw_list->AddLine(ImVec2(ptX.x, origin.y), ImVec2(ptX.x, topRight.y), IM_COL32(100, 255, 100, 150), 1.5f);
+    draw_list->AddLine(ImVec2(origin.x, ptY.y), ImVec2(topRight.x, ptY.y), IM_COL32(100, 150, 255, 150), 1.5f);
+    draw_list->AddCircleFilled(ptX, 6.0f, IM_COL32(100, 255, 100, 255));
+    draw_list->AddCircleFilled(ptY, 6.0f, IM_COL32(100, 150, 255, 255));
+
+    // Для декартова графика (красный шлейф).
+    // Переход через 360° -> 0° по любой оси разрывает линию, а не рисует её через весь график.
+    {
+        const bool wrap = g_havePrevCart && (std::fabs(angle1 - g_prevCartA1) > 180.0f ||
+                                             std::fabs(angle2 - g_prevCartA2) > 180.0f);
+        PushTrailPoint(trailHistoryCartesian, angle1 / 360.0f, angle2 / 360.0f, wrap);
+        g_prevCartA1 = angle1;
+        g_prevCartA2 = angle2;
+        g_havePrevCart = true;
+    }
+    DrawTrail(draw_list, trailHistoryCartesian, g_trailCart, IM_COL32(255, 50, 50, 255), 4.0f,
+              origin, ImVec2(size, -size));
+    draw_list->AddCircleFilled(intersect, 4.0f, IM_COL32(255, 50, 50, 255));
+
+    // ПРАВЫЙ ГРАФИК
+    ImVec2 polarCenter = ImVec2(p.x + halfWidth + 20.0f + size * 0.5f, p.y + size * 0.5f + 20.0f);
+    float radius = size * 0.5f - 10.0f;
+
+    draw_list->AddCircleFilled(polarCenter, radius, IM_COL32(25, 25, 25, 255));
+    draw_list->AddCircle(polarCenter, radius, IM_COL32(100, 100, 100, 255), 0, 2.0f);
+
+    for (int i = 1; i <= 3; ++i) {
+        float r = radius * (i / 4.0f);
+        draw_list->AddCircle(polarCenter, r, IM_COL32(60, 60, 60, 255), 0, 1.0f);
+    }
+
+    // Подписи: 0 - вертикаль вверх, дальше по часовой стрелке (90 справа, 180 снизу, 270 слева).
+    // Это то же направление, что у стрелок на вкладке Monitor и у самой точки графика (angle1 - 90°).
+    const char *labels[4] = {"0", "90", "180", "270"};
+    for (int i = 0; i < 8; ++i) {
+        float a = (i * 45.0f) * (kPi / 180.0f) - kPi * 0.5f;
+        ImVec2 edge = ImVec2(polarCenter.x + radius * cosf(a), polarCenter.y + radius * sinf(a));
+        draw_list->AddLine(polarCenter, edge, IM_COL32(60, 60, 60, 255), 1.0f);
+        if (i % 2 == 0) {
+            int labelIdx = i / 2;
+            ImVec2 textSize = ImGui::CalcTextSize(labels[labelIdx]);
+            ImVec2 textPos = ImVec2(polarCenter.x + (radius + 15.0f) * cosf(a) - textSize.x * 0.5f,
+                                    polarCenter.y + (radius + 15.0f) * sinf(a) - textSize.y * 0.5f);
+            draw_list->AddText(textPos, IM_COL32(150, 150, 150, 255), labels[labelIdx]);
+        }
+    }
+
+    float radius_value = 0.0f;
+    if (g_radiusMode == 0) {
+        radius_value = angle2;
+    } else if (g_radiusMode == 1) {
+        radius_value = fabsf(angle1 - angle2);
+        if (radius_value > 360.0f) radius_value = 360.0f;
+    } else if (g_radiusMode == 2) {
+        radius_value = radius_val_power;
+    }
+
+    // angle1 - угловой сектор (0 - вертикаль вверх)
+    // radius_value - расстояние от центра (0..360)
+    float rad1 = (angle1 - 90.0f) * (kPi / 180.0f);
+    float rNorm = radius_value / 360.0f; // 0..1
+    float unitX = rNorm * cosf(rad1);
+    float unitY = rNorm * sinf(rad1);
+
+    ImVec2 polarPoint = ImVec2(polarCenter.x + unitX * radius, polarCenter.y + unitY * radius);
+
+    // Для полярного графика (оранжевый шлейф).
+    // В режимах 0 и 1 радиус сам "заворачивается" через 360, это тоже разрыв линии.
+    {
+        const bool wrap = g_havePrevPolar && g_radiusMode != 2 &&
+                          std::fabs(radius_value - g_prevPolarRadius) > 180.0f;
+        PushTrailPoint(trailHistoryPolar, unitX, unitY, wrap);
+        g_prevPolarRadius = radius_value;
+        g_havePrevPolar = true;
+    }
+    DrawTrail(draw_list, trailHistoryPolar, g_trailPolar, IM_COL32(255, 150, 50, 255), 4.0f,
+              polarCenter, ImVec2(radius, radius));
+    draw_list->AddCircleFilled(polarPoint, 4.0f, IM_COL32(255, 200, 50, 255));
+
+    ImGui::Dummy(ImVec2(availWidth, size + 40.0f));
+}
+
+
+
+
+
+// files\turn\src\ui_graph.h
+#pragma once
+#include "ui_device.h" // Чтобы иметь доступ к AppState
+
+// Функция отрисовки второй вкладки
+void DrawGraphTab(AppState& state);
+
+
+
+
+
